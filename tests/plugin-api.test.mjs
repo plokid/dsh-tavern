@@ -862,6 +862,11 @@ test('人物卡库、改卡、工具可见范围与 Skill：插件不用读写 T
   assert.equal(h.api.toolModesFor('narrative_anchor_read'), null, '没声明的插件工具保持原样')
   assert.throws(() => tavern.toolModes({ name: 'tavern_read_variables', modes: ['card'] }), /插件自己注册/)
   assert.throws(() => tavern.toolModes({ name: 'x_tool', modes: ['story'] }), /play、card/)
+  tavern.toolSkills({ name: 'wrongbook_lookup', skills: ['wrongbook', 'wrongbook'] })
+  assert.deepEqual(h.api.toolSkillsFor('wrongbook_lookup'), ['wrongbook'])
+  assert.equal(h.api.toolSkillsFor('narrative_anchor_read'), null, '没声明的插件工具始终提供')
+  assert.throws(() => tavern.toolSkills({ name: 'tavern_read_variables', skills: ['x'] }), /插件自己注册/)
+  assert.throws(() => tavern.toolSkills({ name: 'x_tool', skills: ['Bad Name'] }), /Skill 名称/)
 
   assert.deepEqual(await tavern.listSkills(), [{ name: 'debug-card', source: 'builtin', description: '内置' }])
   assert.deepEqual(await tavern.saveSkill({ name: 'my-notes', description: '踩坑', body: '先读参考', references: [{ path: 'references/错题.md', content: '…' }] }), { name: 'my-notes', overwritten: false })
@@ -873,6 +878,7 @@ test('人物卡库、改卡、工具可见范围与 Skill：插件不用读写 T
   fiber.dispose()
   await tick()
   assert.equal(h.api.toolModesFor('wrongbook_lookup'), null, '插件卸载后可见范围撤销')
+  assert.equal(h.api.toolSkillsFor('wrongbook_lookup'), null, '插件卸载后解锁 Skill 撤销')
 })
 
 test('人物设计档案：插件读取本局档案，并能按结算同样的规则保存人物', { skip: !cordis }, async t => {
@@ -939,11 +945,12 @@ test('角色素材来源：插件交出的人物经校验后并入本局角色�
   assert.deepEqual(await h.api.castAssetSources({ gameId: 'game-1' }), [])
 })
 
-test('配音渠道：插件注册的渠道带上归属，合成超时或出错记入插件错误；synthesizeSpeech 按本局人物声音合成', { skip: !cordis }, async t => {
+test('配音渠道：插件注册的渠道带上归属并通知语音服务接入，合成超时或出错记入插件错误；synthesizeSpeech 经语音服务合成', { skip: !cordis }, async t => {
   const lines = []
-  const h = await harness(t, { synthesizeSpeech: async (sessionId, line) => { lines.push([sessionId, line]); return line.narration ? { skip: true } : { url: '/api/dsh-tavern/speech-audio?id=x.mp3', mediaType: 'audio/mpeg' } } })
+  let changes = 0
+  const h = await harness(t, { speechProvidersChanged: () => { changes++ }, synthesizeSpeech: async (sessionId, line) => { lines.push([sessionId, line]); return line.narration ? { skip: true, reason: 'narration' } : { url: 'audio:t1', mediaType: 'audio/wav' } } })
   let tavern
-  await h.root.plugin({ name: 'edge-tts', inject: ['tavern'], apply(ctx) {
+  const fiber = await h.root.plugin({ name: 'edge-tts', inject: ['tavern'], apply(ctx) {
     tavern = ctx.tavern
     ctx.tavern.speechProvider({ id: 'edge', label: 'Edge 朗读', voices: ['zh-CN-XiaoxiaoNeural'], synthesize: async ({ text }) => {
       if (text === 'boom') throw new Error('服务挂了')
@@ -954,15 +961,18 @@ test('配音渠道：插件注册的渠道带上归属，合成超时或出错�
   const [entry] = h.api.speechProviders()
   assert.equal(entry.id, 'edge-tts/edge')
   assert.equal(entry.owner, 'edge-tts')
+  assert.equal(changes, 1)
   assert.deepEqual(await entry.synthesize({ text: '你好' }), { data: new Uint8Array([1]), mediaType: 'audio/mpeg' })
   await assert.rejects(entry.synthesize({ text: 'boom' }), /服务挂了/)
   assert.throws(() => tavern.speechProvider({ id: 'edge', label: '重复', synthesize() {} }), /已注册/)
   assert.throws(() => tavern.speechProvider({ id: 'Bad', label: 'x', synthesize() {} }), /name/)
 
-  assert.deepEqual(await tavern.synthesizeSpeech({ gameId: 'game-1', speaker: '林曦', text: '你好', emotion: 'joy' }), { url: '/api/dsh-tavern/speech-audio?id=x.mp3', mediaType: 'audio/mpeg' })
+  assert.deepEqual(await tavern.synthesizeSpeech({ gameId: 'game-1', speaker: '林曦', text: '你好', emotion: 'joy' }), { url: 'audio:t1', mediaType: 'audio/wav' })
   assert.deepEqual(lines[0], ['game-1', { speaker: '林曦', text: '你好', emotion: 'joy', narration: false }])
   assert.equal(await tavern.synthesizeSpeech({ gameId: 'game-1', text: '夜深了。', narration: true }), null)
   await assert.rejects(tavern.synthesizeSpeech({ gameId: 'game-1', text: ' ' }), /text/)
+  await fiber.dispose(); await tick()
+  assert.equal(changes, 2, '卸载插件后语音服务移除它的渠道')
 })
 
 test('生图渠道：插件注册的出图能力带上归属，状态被规整，出错记入插件错误', { skip: !cordis }, async t => {
